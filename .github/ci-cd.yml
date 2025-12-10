@@ -1,0 +1,91 @@
+name: Build, Push & Deploy to EKS (ECR + Helm)
+
+on:
+  push:
+    branches: [ "main" ]
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: demo-app
+  CLUSTER_NAME: demo-eks-cluster
+  HELM_RELEASE: demo-release
+  HELM_NAMESPACE: default
+  CHART_PATH: ./helm-repo
+  APP_NAME: flaskapp
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    outputs:
+      image_repo: ${{ steps.set-outputs.outputs.image_repo }}
+      image_tag: ${{ steps.set-outputs.outputs.image_tag }}
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v2
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Compute registry and tag
+      id: set-outputs
+      run: |
+        ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+        REGISTRY="${ACCOUNT_ID}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com"
+        IMAGE_TAG="${{ github.sha }}"
+        echo "image_repo=${REGISTRY}/${{ env.ECR_REPOSITORY }}" >> $GITHUB_OUTPUT
+        echo "image_tag=${IMAGE_TAG}" >> $GITHUB_OUTPUT
+    
+    - name: Login to ECR
+      uses: aws-actions/amazon-ecr-login@v1
+
+    - name: Build and push Docker image to ECR
+      uses: docker/build-push-action@v5
+      with:
+        context: ./app
+        push: true
+        tags: ${{ steps.set-outputs.outputs.image_repo }}:${{ steps.set-outputs.outputs.image_tag }}
+
+    - name: Output pushed image URI
+      run: |
+        echo "Pushed image: ${{ steps.set-outputs.outputs.image_repo }}:${{ steps.set-outputs.outputs.image_tag }}"
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v2
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Install kubectl
+      uses: azure/setup-kubectl@v3
+      with:
+        version: '1.27.3'
+
+    - name: Update kubeconfig for EKS
+      run: |
+        aws eks update-kubeconfig --name "${{ env.CLUSTER_NAME }}" --region "${{ env.AWS_REGION }}"
+
+    - name: Install Helm
+      uses: azure/setup-helm@v3
+
+    - name: Helm upgrade/install
+      env:
+        IMAGE_REPOSITORY: ${{ needs.build-and-push.outputs.image_repo }}
+        IMAGE_TAG: ${{ needs.build-and-push.outputs.image_tag }}
+      run: |
+        echo "Deploying ${IMAGE_REPOSITORY}:${IMAGE_TAG} to ${CLUSTER_NAME} (namespace=${HELM_NAMESPACE})"
+        helm upgrade --install "${{ env.HELM_RELEASE }}" "${{ env.CHART_PATH }}" \
+          --namespace "${{ env.HELM_NAMESPACE }}" --create-namespace \
+          --set image.repository=${IMAGE_REPOSITORY} \
+          --set image.tag=${IMAGE_TAG}
