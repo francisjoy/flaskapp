@@ -18,6 +18,7 @@ jobs:
     outputs:
       image_repo: ${{ steps.set-outputs.outputs.image_repo }}
       image_tag: ${{ steps.set-outputs.outputs.image_tag }}
+    environment: dev
 
     steps:
     - name: Checkout
